@@ -1,0 +1,283 @@
+---
+title: "human-footprint"
+output: github_document
+date: '2022-04-06'
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(gbifdb)
+library(zoo)
+library(sf)
+library(terra)
+library(readxl)
+library(vdemdata)
+library(countrycode)
+library(ggpubr)
+library(MetBrewer)
+```
+
+# human footprint
+
+HF data: Venter, O., Sanderson, E., Magrach, A. et al. Sixteen years of change in the global terrestrial human footprint and implications for biodiversity conservation. Nat Commun 7, 12558 (2016). https://doi.org/10.1038/ncomms12558
+
+"HFP provides a spatially explicit index of cumulative human pressure ranging from 0 to 50, where a value of zero corresponds to ‘wilderness areas’ free from any significant human influence15, a value of four corresponds to low pressure levels (e.g. pasture lands), and values above 20 typically represents very high pressure levels (e.g. densely populated semi-urban and urban areas)."
+
+```{r}
+db <- gbif_remote(bucket="gbif", endpoint_override = "minio.carlboettiger.info", version="2021-11-01")
+```
+
+```{r}
+location <-  db %>%
+    #filter(countrycode == "US") %>%
+    count(decimallatitude, decimallongitude) %>%
+    collect()
+```
+
+```{r}
+if (!file.exists("../data/HF/HFP2009.tif")) {
+  download.file("https://wcshumanfootprint.org/data/HFP2009.zip","../data/human-footprint/HF.zip")
+  unzip("../data/human-footprint/HF.zip", exdir = "../data/human-footprint/")
+}
+HF <- terra::rast("../data/HF/HFP2009.tif")
+
+# this weirdly downloads the same values as 2009 .tif (had to go download this separately from the 2016 Nature Comms paper dryad...)
+#if (!file.exists("../data/HF/HFP1993.tif")) {
+#  download.file("https://wcshumanfootprint.org/data/HFP1993.zip", "../data/human-footprint/HF1993.zip")
+#  unzip("../data/human-footprint/HF1993.zip", exdir = "../data/human-footprint/")
+#}
+HF93 <- terra::rast("../data/HF/HFP1993.tif")
+if (!file.exists("../data/HF/HFP1993.tif")) { 
+  changeHF <- HF-HF93
+  writeRaster(changeHF, "../data/HF/changeHF.tif")
+}
+changeHF <- terra::rast("../data/HF/changeHF.tif")
+```
+
+```{r cache = TRUE}
+crdref <- "+proj=longlat +datum=WGS84"
+pts <- vect(location, geom = c("decimallongitude", "decimallatitude"), crs = crdref)
+HF <- terra::project(HF, pts)
+HF93 <- terra::project(HF93, pts)
+```
+
+```{r cache = TRUE}
+GBIF_HF <- terra::extract(HF,pts)
+GBIF_HF <- GBIF_HF %>% mutate(HFP2009 = round(HFP2009,0)) %>%
+  group_by(HFP2009) %>%
+  count() %>% 
+  ungroup() %>% mutate(n = n/sum(n)) %>%
+  rename(GBIF_n_HF = n)
+
+GBIF_changeHF <- terra::extract(changeHF,pts)
+GBIF_changeHF <- GBIF_changeHF %>% mutate(HFP2009 = round(HFP2009,0)) %>%
+  group_by(HFP2009) %>%
+  count() %>%
+  ungroup() %>% mutate(n = n/sum(n)) %>%
+  rename(GBIF_n_HF = n)
+```
+
+```{r cache = TRUE}
+HF2009_df <- terra::as.data.frame(HF, xy = FALSE, na.rm = TRUE) 
+HF2009_df <- HF2009_df %>%
+  mutate(HFP2009 = round(HFP2009,0)) %>%
+  group_by(HFP2009) %>%
+  count() %>% ungroup() %>% mutate(n = n/sum(n)) %>%
+  rename(n_HF = n)
+
+changeHF_df <- terra::as.data.frame(changeHF, xy = FALSE, na.rm = TRUE)
+changeHF_df <- changeHF_df %>%
+  mutate(HFP2009 = round(HFP2009,0)) %>%
+  group_by(HFP2009) %>%
+  count() %>%
+  ungroup() %>% mutate(n = n/sum(n)) %>%
+  rename(n_HF = n)
+```
+
+```{r}
+a <- HF2009_df %>%
+  full_join(GBIF_HF) %>%
+  rename(`Human Footprint (all)` = n_HF,
+         `Human Footprint (GBIF)` = GBIF_n_HF) %>%
+  pivot_longer(-HFP2009) %>%
+  ggplot() +
+  geom_col(aes(x = HFP2009, y=value, fill = name), breaks=seq(0,50,1), alpha=0.5, 
+                 position="identity", lwd=0.2) + theme_classic() + 
+  labs(x = "human footprint (2009)", y = "density") + 
+  theme(legend.position = c(0.7,0.8), legend.title = element_blank()) +
+  scale_fill_manual(values=met.brewer("Renoir", 2))
+```
+
+```{r}
+b <- changeHF_df %>%
+  full_join(GBIF_changeHF) %>% 
+  rename(`Human Footprint Change (all)` = n_HF,
+         `Human Footprint Change (GBIF)` = GBIF_n_HF) %>%
+  pivot_longer(-HFP2009) %>%
+  ggplot() +
+  geom_col(aes(x = HFP2009, y=value, fill = name), breaks=seq(0,50,1), alpha=0.5, 
+                 position="identity", lwd=0.2) + theme_classic() + 
+  labs(x = "human footprint change (1993-2009)", y = "density") + 
+  theme(legend.position = "none", legend.title = element_blank()) +
+  scale_fill_manual(values=met.brewer("Renoir", 2))
+```
+
+# Redlining
+
+higher sampling per unit area in neighborhoods that were not historically redlined. 
+
+```{r}
+# theres certainly a better way to do this but a sloppy first pass
+if (!file.exists("../data/output/gbif_holc.csv")) { # this all takes a bit to run...
+  
+  holc <- st_read("https://dsl.richmond.edu/panorama/redlining/static/fullDownload.geojson") %>%
+    select(state, holc_grade, geometry) %>%
+    dplyr::filter(!is.na(holc_grade) & holc_grade != 'E') %>%
+    dplyr::filter(!st_is_empty(.)) %>%
+    sf::st_make_valid(.) %>%
+    dplyr::mutate(valid =st_is_valid(holc)) %>% 
+    dplyr::filter(valid=="TRUE") 
+
+  US <-  
+    gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    filter(countrycode == "US") %>%
+    count(class, decimallatitude, decimallongitude) %>%
+    collect()
+
+  us_pts <- st_as_sf(US, coords = c("decimallongitude", "decimallatitude"), crs = st_crs(holc))
+
+  holc <- holc %>%
+    dplyr::mutate(valid =st_is_valid(holc)) %>% 
+    dplyr::filter(valid=="TRUE") 
+
+  #st_intersects is much faster than intersection but not sure how to do this while maintaining polygon info? 
+  # heres a clunky workaround
+  holcA <- holc %>% filter(holc_grade == "A")
+  holcB <- holc %>% filter(holc_grade == "B")
+  holcC <- holc %>% filter(holc_grade == "C")
+  holcD <- holc %>% filter(holc_grade == "D")
+
+  gbifA = lengths(st_intersects(us_pts, holcA)) > 0
+  us_pts$holcA <- gbifA
+
+  gbifB = lengths(st_intersects(us_pts, holcB)) > 0
+  us_pts$holcB <- gbifB
+
+  gbifC = lengths(st_intersects(us_pts, holcC)) > 0
+  us_pts$holcC <- gbifC
+
+  gbifD = lengths(st_intersects(us_pts, holcD)) > 0
+  us_pts$holcD <- gbifD
+
+  as_tibble(us_pts) %>% write_csv("../data/output/gbif_holc.csv")
+}
+#read in output
+gbif_holc <- read_csv("../data/output/gbif_holc.csv")
+```
+
+```{r}
+holc <- st_read("https://dsl.richmond.edu/panorama/redlining/static/fullDownload.geojson") %>%
+  select(state, holc_grade, geometry) %>%
+  dplyr::filter(!is.na(holc_grade) & holc_grade != 'E') %>%
+  dplyr::filter(!st_is_empty(.)) %>%
+  sf::st_make_valid(.) 
+
+holc_area <- holc %>% 
+  dplyr::mutate(valid =st_is_valid(holc)) %>% 
+  dplyr::filter(valid=="TRUE") %>%
+  mutate(area = st_area(geometry)) %>%
+  as_tibble() %>%
+  group_by(holc_grade) %>%
+  summarise(area = as.numeric(sum(area)/10^6))
+```
+
+
+```{r}
+gbif_holc <- read_csv("../data/output/gbif_holc.csv") %>%
+  select(-geometry) %>% 
+  rename(A = "holcA", 
+         B = "holcB",
+         C = "holcC",
+         D = "holcD") %>%
+  pivot_longer(-c(class,n)) %>%
+  filter(value == TRUE) %>%
+  group_by(name) %>%
+  summarise(n = sum(n)) %>% 
+  rename(holc_grade = "name") %>%
+  left_join(holc_area) %>%
+  mutate(samplingDensity = n/area)
+
+d <- gbif_holc %>%
+  ggplot(aes(x = reorder(holc_grade, samplingDensity), y = samplingDensity, fill = holc_grade)) + 
+  scale_fill_manual(values=c("green4","dodgerblue3", "gold1", "firebrick4")) +
+  geom_col(width = 0.6) + theme_classic() + theme(legend.position = "none") + 
+  labs(x = "holc grade", y = "sampling density (obs per area)") + coord_flip()
+```
+
+# Metro areas
+
+```{r}
+#download.file("https://www2.census.gov/geo/tiger/TIGER2019/CBSA/tl_2019_us_cbsa.zip","../data/metro/metro.zip")
+#unzip("../data/metro/metro.zip", exdir = "../data/metro/")
+```
+
+
+```{r}
+if (!file.exists("../data/output/gbif_metro.csv")) { # this all takes a bit to run...
+  
+  metro_income <- read_csv("../data/metro/lapi1121msa.csv")
+  metro <- st_read("../data/metro/tl_2019_us_cbsa.shp") %>%
+    left_join(metro_income) %>% select(NAME,PC2018, geometry) %>% 
+    drop_na() %>%
+    dplyr::filter(!st_is_empty(.)) %>%
+    sf::st_make_valid(.) 
+
+  US <-  
+    gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    filter(countrycode == "US") %>%
+    count(class, decimallatitude, decimallongitude) %>%
+    collect()
+
+  us_pts <- st_as_sf(US, coords = c("decimallongitude", "decimallatitude"), crs = st_crs(metro))
+
+  metro <- metro %>%
+    #dplyr::mutate(valid =st_is_valid(holc)) %>% 
+    #dplyr::filter(valid=="TRUE") %>%
+    mutate(counts = lengths(st_intersects(., us_pts))) %>%
+    mutate(area = st_area(geometry))
+
+  metro %>% mutate(area = st_area(geometry)) %>% select(-geometry) %>%
+    as_tibble(metro) %>% write_csv("../data/output/gbif_metro.csv")
+}
+#read in output
+gbif_metro <- read_csv("../data/output/gbif_metro.csv")
+```
+```{r include = FALSE}
+fancy_scientific <- function(l) {
+     # turn in to character string in scientific notation
+     l <- format(l, scientific = TRUE)
+     # quote the part before the exponent to keep all the digits
+     l <- gsub("^(.*)e", "'\\1'e", l)
+     # turn the 'e+' into plotmath format
+     l <- gsub("e", "%*%10^", l)
+     # return this as an expression
+     parse(text=l)
+}
+```
+
+```{r}
+c <- gbif_metro %>% select(-geometry) %>%
+  mutate(count_density = counts/area*10^9) %>%
+  ggplot(aes(PC2018, counts)) + geom_point(size = 3, alpha = 0.5) +
+  theme_classic() + 
+  scale_y_log10(breaks = scales::log_breaks(n = 4)) +
+  scale_x_log10(breaks = scales::log_breaks(n = 5)) +
+  labs(y = "observations", x = "per capita income")
+```
+
+```{r human_footprint, fig.width=7, fig.height=4, dpi = 300}
+ggarrange(a, b, c, d, ncol = 2, nrow = 2, labels = c("A", "B", "C", "D"))
+```
+
+
+

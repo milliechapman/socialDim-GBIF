@@ -1,0 +1,228 @@
+---
+title: "spatial-temporal"
+output: html_document
+date: '2022-04-09'
+---
+
+```{r}
+library(ggthemes)
+```
+
+```{r}
+gbif <-  
+    gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    count(countrycode, kingdom, month, year, basisofrecord) %>%
+    collect()
+```
+
+```{r}
+world_map <- st_read("../data/country-boundaries/ne_50m_admin_0_countries.shp") %>%
+  select(ISO_A2, geometry) #%>%
+  #st_transform(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+```
+
+```{r}
+map <- gbif %>%
+  group_by(countrycode) %>%
+  summarise(n = sum(n)) %>%
+  rename(ISO_A2 = countrycode) %>%
+  left_join(world_map) %>%
+  ggplot() + geom_sf(aes(geometry = geometry, fill = log(n)), lwd = 0) +
+  scale_fill_gradient(low = "yellow", high = "red", na.value = NA) +
+  theme_classic() + theme(legend.position = c(0.1,0.4))
+```
+```{r}
+gbif_latlong <-  
+    gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    count(decimallatitude, decimallongitude) %>%
+    collect()
+```
+
+```{r}
+lat <- gbif_latlong %>% mutate(decimallatitude = round(decimallatitude,0),
+                       decimallongitude = round(decimallongitude,0)) %>%
+  group_by(decimallatitude) %>%
+  summarise(n = sum(n))
+
+long <- gbif_latlong %>% mutate(decimallatitude = round(decimallatitude,0),
+                       decimallongitude = round(decimallongitude,0)) %>%
+  group_by(decimallongitude) %>%
+  summarise(n = sum(n))
+```
+
+
+```{r}
+lat_plot <- lat %>% ggplot() +
+  geom_col(aes(decimallatitude, n), fill = "darkgrey") +
+  theme_classic() + coord_flip() +
+  theme(axis.line.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), axis.title.x = element_blank()) +
+  theme(axis.line.y = element_blank(), axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), axis.title.y = element_blank())
+
+long_plot <- long %>% ggplot() +
+  geom_col(aes(decimallongitude, n), fill = "darkgrey") + 
+  theme_classic() +
+  theme(axis.line.y = element_blank(), axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), axis.title.y = element_blank()) +
+  theme(axis.line.x = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), axis.title.x = element_blank()) 
+```
+
+
+# MAP
+
+
+
+```{r}
+timeseries <- gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    #filter(countrycode == "US") %>%
+    filter(year > 1989 & year < 2020) %>%
+    count(month, year) %>%
+    collect()
+
+D <- timeseries %>% mutate(month = str_pad(month, 2, pad = "0")) %>%
+  mutate(yrmonth = paste0(year, "-", month, "-01", sep="")) %>% drop_na() %>%
+  mutate(date = as.Date(yrmonth)) %>%
+  ggplot(aes(x = date, y = n, fill = month)) + 
+  geom_col() + theme_classic() +
+  theme(axis.title.x = element_blank()) + theme(legend.position = "none") +
+  scale_fill_manual(values=met.brewer("Degas", 12))  + labs(y = "observations per month")
+```
+
+
+# kingdom and type of record
+
+```{r}
+k1990 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(kingdom, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 1990) %>%
+  mutate(kingdom = case_when(
+      kingdom == "Animalia" | kingdom == "Plantae"  ~ kingdom,
+      kingdom != "Animalia" & kingdom != "Plantae"  ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=kingdom)) +
+  geom_bar(stat="identity", width=1, lwd=0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#56B4E9","#999999", "#009E73"))
+
+k2000 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(kingdom, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 2000) %>%
+  mutate(kingdom = case_when(
+      kingdom == "Animalia" | kingdom == "Plantae"  ~ kingdom,
+      kingdom != "Animalia" & kingdom != "Plantae"  ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=kingdom)) +
+  geom_bar(stat="identity", width=1, lwd=0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#56B4E9","#999999", "#009E73"))
+
+
+k2010 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(kingdom, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 2010) %>%
+  mutate(kingdom = case_when(
+      kingdom == "Animalia" | kingdom == "Plantae"  ~ kingdom,
+      kingdom != "Animalia" & kingdom != "Plantae"  ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=kingdom)) +
+  geom_bar(stat="identity", width=1, lwd=0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#56B4E9","#999999", "#009E73"))
+
+```
+
+
+```{r}
+b1990 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(basisofrecord, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 1990) %>%
+  mutate(basisofrecord = case_when(
+      basisofrecord == "HUMAN_OBSERVATION" ~ "human observation",
+      basisofrecord != "HUMAN_OBSERVATION" ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=basisofrecord)) +
+  geom_bar(stat="identity", width=1, lwd=0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#E69F00","#999999"))
+
+
+b2000 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(basisofrecord, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 2000) %>%
+  mutate(basisofrecord = case_when(
+      basisofrecord == "HUMAN_OBSERVATION" ~ "human observation",
+      basisofrecord != "HUMAN_OBSERVATION" ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=basisofrecord)) +
+  geom_bar(stat="identity", width=1, lwd=0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#E69F00","#999999"))
+
+b2010 <- gbif %>% filter(year > 1989) %>%
+  mutate(decade = (year - year %% 10)) %>%
+  group_by(basisofrecord, decade) %>%
+  summarise(n = sum(n)) %>% filter(decade == 2010) %>%
+  mutate(basisofrecord = case_when(
+      basisofrecord == "HUMAN_OBSERVATION" ~ "human observation",
+      basisofrecord != "HUMAN_OBSERVATION" ~ "Other"
+  )) %>%
+  ggplot(aes(x="", y=n, fill=basisofrecord)) +
+  geom_bar(stat="identity", width=1, lwd = 0) +
+  coord_polar("y", start=0) +
+  theme_void() + theme(legend.position = "none") +
+  scale_fill_manual(values=c("#E69F00","#999999"))
+```
+
+
+```{r fig.width=10, fig.height=11, dpi=300}
+library(patchwork)
+layout <- 
+"AAAAAAAAAAAA##
+CCCCCCCCCCCCBB
+CCCCCCCCCCCCBB
+CCCCCCCCCCCCBB
+DDDDDDDDDDDDD#
+##EH##FI##GJ##
+"
+f4 <- long_plot + lat_plot + map + D +
+  k1990 + k2000 + k2010 + 
+  b1990 + b2000 + b2010 +
+  plot_layout(design = layout) +
+  plot_annotation(tag_levels = 'A')
+f4
+ggsave("../scripts/figure1.png", width = 8, height = 7, dpi = 300)
+```
+
+
+```{r fig.width=10, fig.height=11, dpi=300}
+library(patchwork)
+layout <- 
+"
+AAAAAA
+AAAAAA
+AAAAAA
+BBBBBB
+CFDGEH
+"
+map <- map+ theme_classic()
+
+f4 <-  map + D +
+  k1990 + k2000 + k2010 + 
+  b1990 + b2000 + b2010 +
+  plot_layout(design = layout) +
+  plot_annotation(tag_levels = 'A')
+f4
+ggsave("../scripts/figure1b.png", width = 8, height = 7, dpi = 300)
+```

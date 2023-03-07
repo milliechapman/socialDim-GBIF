@@ -1,0 +1,239 @@
+---
+title: "gbif-timing"
+output: github_document
+date: '2022-04-01'
+---
+
+# Weekends/holidays
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 8, collapse = TRUE)
+```
+
+```{r message=FALSE}
+library(tidyverse)
+library(gbifdb)
+library(zoo)
+library(sf)
+library(terra)
+library(readxl)
+library(vdemdata)
+library(countrycode)
+library(MetBrewer)
+```
+
+```{r}
+#Sys.setenv("GBIF_HOME"="/home/shared-data/gbif")
+#db <- gbif_local()
+rb <- gbif_remote(bucket="gbif", endpoint_override = "minio.carlboettiger.info", version="2021-11-01")
+
+gbif <-  
+    rb %>% filter(year > 1950 & year <2021) %>%
+    #filter(countrycode == "US") %>%
+    count(eventdate, year, countrycode) %>%
+    collect()
+```
+
+
+day of week - more observations on the weekend in the US 
+
+```{r cache = TRUE}
+gbif_DoW <- gbif %>% 
+  mutate(eventdate = as.Date(eventdate),
+         year = format(eventdate, "%Y")) %>%
+  mutate(dayofweek =  weekdays(eventdate)) %>%
+  filter(year > 1950 & year <2020) %>%
+  group_by(dayofweek) %>%
+  count() %>% 
+  mutate(weekend = ifelse(dayofweek %in% c("Saturday", "Sunday"), "weekend", "weekday")) 
+
+weekends <- gbif_DoW %>% 
+  ggplot(aes(reorder(dayofweek,n), n, fill = weekend)) + 
+  geom_col(width = 0.6) + theme_classic() +
+  theme(legend.position = "none", axis.title.y = element_blank()) +
+  labs(y = "total observatons") +
+  scale_fill_manual(values=c("grey", met.brewer("Egypt", 1))) + coord_flip()
+```
+
+# Community/citizen science initiatives
+
+2016-2020 you see a pretty pronounced peak at the end of April/first few days of May which upon a quick google search:
+
+"April 29-May 2 is the City in Nature Challenge, a global citizen science event that invites people all over the world to explore their local environment using the app iNaturalist." (started in 2016 or 2015..)
+
+```{r cache=TRUE}
+yearly <- gbif %>% 
+  filter(year >2015 & year < 2021) %>%
+  mutate(eventdate = as.Date(eventdate),
+         julian = format(eventdate, "%j"),
+         year = as.numeric(year)) %>%
+  mutate(dayofweek =  weekdays(eventdate)) %>%
+  group_by(year, julian, countrycode) %>%
+  summarise(n = sum(n)) %>%
+  arrange(julian) 
+
+#yearly$n_07da = rollmean(yearly$n, 7, align='right', fill = NA)
+
+y2015 <- yearly %>% 
+  group_by(julian) %>%
+  summarise(n = sum(n)) %>%
+  ungroup() %>%
+  mutate(julian = as.numeric(julian)) %>%
+  ggplot() + 
+  geom_col(aes(julian, n), width = 0.8) +
+  #geom_line(aes(as.numeric(julian), n_07da), color = "red", lwd = 1) + 
+  theme_classic()
+```
+
+# Superb owls? (Sporting events?)
+
+less observations on superbowl sunday relative to non-superbowl sundays in Jan/Feb. Expected to see a smaller difference for owls in recent years (#SuperbOwl citizen science movement) but seemingly no particularly distinuishable pattern
+
+```{r cache=TRUE}
+US <-  
+    gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    filter(countrycode == "US") %>%
+    count(eventdate) %>%
+    collect()
+
+SB <- read_csv("../data/superbowl-dates.csv") %>%
+  mutate(eventdate = as.Date(DATE)) %>%
+  mutate(SB = "Superbowl day") %>% drop_na() %>%
+  select(eventdate, SB)
+
+US <- US %>% 
+  mutate(eventdate = as.Date(eventdate)) %>%
+  left_join(SB, by = "eventdate") %>%
+  mutate(dayofweek =  weekdays(eventdate),
+         month = format(eventdate, "%m")) %>%
+  filter(dayofweek == "Sunday")  
+```
+
+
+```{r}
+d <- US %>%
+  filter(month == "01" | month == "02") %>%
+  mutate(year = format(eventdate, "%Y")) %>%
+  filter(year > 1990 & year < 2020) %>%
+  group_by(eventdate) %>%
+  mutate(obs = sum(n)) %>% ungroup() %>%
+  mutate(SB = replace_na(SB, "Sunday (not superbowl)")) %>% drop_na() %>%
+  select(eventdate, SB, obs, year) %>% unique() %>%
+  group_by(year, SB) %>%
+  mutate(obs = mean(obs)) %>% mutate(year = as.double(year)) %>%
+  ggplot(aes(x = year, y = obs, linetype = SB, group = SB)) + geom_line() + 
+  theme_classic() +
+  theme(legend.position = c(0.3,0.8), legend.title = element_blank(),
+        axis.title.x = element_blank())
+```
+
+
+
+# World cup 
+
+```{r}
+soccer <- read_csv("../data/WorldCupMatches.csv") %>%
+  separate(Datetime, c("day", "month")) %>%
+  mutate(datetime = paste0(day, "-", month, "-",Year)) %>%
+  mutate(eventdate = as.Date(datetime, "%d-%b-%Y")) %>%
+  mutate(soccer = "world cup") %>%
+  select(eventdate, soccer) %>% 
+  separate(eventdate, c("year", "month", "day")) %>% 
+  mutate(day = as.numeric(day),
+         month = as.numeric(month),
+         year = as.numeric(year)) %>%
+  group_by(year) %>%
+  mutate(month = max(month),
+         day = max(day))%>% unique() %>% ungroup() %>%
+  mutate(day = as.integer(day)) %>%
+  mutate(day = recode(day, `31` = 30L), day = as.double(day))
+```
+
+```{r}
+wordcup <- gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    #filter(countrycode == "US") %>%
+    filter(month > 4 & month <8) %>%
+    filter(year > 1989 & year < 2020) %>%
+    count(month, day, year) %>%
+    collect()
+```
+
+
+```{r}
+c <- wordcup %>%
+  full_join(soccer, by = c("day", "month", "year")) %>%
+  #group_by(eventdate) %>%
+  #mutate(obs = sum(n)) %>% ungroup() %>% 
+  mutate(soccer = replace_na(soccer, "Not worldcup")) %>% unique() %>%
+  group_by(year, soccer) %>%
+  summarise(obs = mean(n, na.rm = TRUE)) %>% ungroup() %>%
+  filter(year >1989) %>%
+  ggplot(aes(x = year, y = obs,group = soccer, linetype = soccer)) + geom_line() +
+  theme_classic() + 
+  theme(legend.position = c(0.3,0.8), legend.title = element_blank(),
+        axis.title.x = element_blank())
+```
+
+# holidays 
+
+```{r}
+library(tis)
+hld <- tis::holidays(2000:2020)
+holid <- as.Date(as.character(hld), format = "%Y%m%d")
+names <- names(hld)
+holid <- as_tibble(holid) %>%
+  mutate(holiday = names) %>%
+  mutate(eventdate = as.Date(value, "%d-%b-%Y")) %>%
+  separate(eventdate, c("year", "month", "day")) %>% select(-value) %>%
+  mutate(day = as.numeric(day),
+         month = as.numeric(month),
+         year = as.numeric(year))
+```
+
+```{r}
+times <- gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    filter(countrycode == "US") %>%
+    filter(year > 2000 & year < 2020) %>%
+    count(day,month,year) %>%
+    collect()
+```
+
+```{r}
+b <- holidays <- times %>%
+  left_join(holid, by=c("day","month","year")) %>% 
+  mutate(holiday = replace_na(holiday, "not holiday")) %>%
+  group_by(month, year) %>% 
+  mutate(monthly_mean = mean(n)) %>% 
+  ungroup() %>%
+  filter(holiday %in% c("Christmas", "Labor", "Memorial", "Thanksgiving", "GWBirthday", "MLKing", "NewYears")) %>%
+  mutate(holiday_diff = n-monthly_mean) %>%
+  ggplot(aes(x = holiday, y = holiday_diff)) + geom_boxplot() + geom_point(alpha=0.2) +
+  theme_classic() + geom_hline(yintercept = 0, linetype = "dotted") +
+  theme(axis.title.x = element_blank(), axis.text.x = element_text(size =6)) +labs(y = "difference from mean background (month-year)")
+```
+
+timeseies
+```{r}
+timeseries <- gbif_remote(to_duckdb = FALSE, bucket = "gbif", version = "2021-11-01", endpoint_override = "minio.carlboettiger.info") %>%
+    #filter(countrycode == "US") %>%
+    filter(year > 1989 & year < 2020) %>%
+    count(month, year) %>%
+    collect()
+
+e <- timeseries %>% mutate(month = str_pad(month, 2, pad = "0")) %>%
+  mutate(yrmonth = paste0(year, "-", month, "-01", sep="")) %>% drop_na() %>%
+  mutate(date = as.Date(yrmonth)) %>%
+  ggplot(aes(x = date, y = n, fill = month)) + 
+  geom_col() + theme_classic() +
+  theme(axis.title.x = element_blank()) +
+  scale_fill_manual(values=met.brewer("Degas", 12))
+```
+
+```{r fig.width=8, fig.height=6}
+sports <- ggarrange(c, d, nrow = 2, labels = c("C", "D"))
+top <- ggarrange(weekends, b, sports, nrow = 1, ncol =3, labels = c("A", "B", ""))
+#ggarrange(top, e, ncol =1, labels = c("", "E"))
+top
+ggsave("../scripts/gbif-timing_files/timing.png", width = 12, height = 4, dpi = 300)
+```
+
